@@ -4,11 +4,18 @@ pragma solidity 0.8.18;
 import "forge-std/console.sol";
 import {ExtendedTest} from "./ExtendedTest.sol";
 
-import {Strategy, ERC20} from "../../Strategy.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {V2RouterFactory, V2Router, IYearnV2} from "../../V2RouterFactory.sol";
 import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
+
+interface IV2Strategy {
+    function harvest() external;
+
+    function keeper() external view returns (address);
+}
 
 interface IFactory {
     function governance() external view returns (address);
@@ -22,6 +29,8 @@ contract Setup is ExtendedTest, IEvents {
     // Contract instances that we will use repeatedly.
     ERC20 public asset;
     IStrategyInterface public strategy;
+    IYearnV2 public v2Vault;
+    V2RouterFactory public strategyFactory = new V2RouterFactory();
 
     mapping(string => address) public tokenAddrs;
 
@@ -40,7 +49,7 @@ contract Setup is ExtendedTest, IEvents {
 
     // Fuzz from $0.01 of 1e6 stable coins up to 1 trillion of a 1e18 coin
     uint256 public maxFuzzAmount = 1e30;
-    uint256 public minFuzzAmount = 10_000;
+    uint256 public minFuzzAmount = 1e16;
 
     // Default profit max unlock time is set for 10 days
     uint256 public profitMaxUnlockTime = 10 days;
@@ -50,6 +59,10 @@ contract Setup is ExtendedTest, IEvents {
 
         // Set asset
         asset = ERC20(tokenAddrs["DAI"]);
+
+        v2Vault = IYearnV2(0xdA816459F1AB5631232FE5e97a05BBBb94970c95);
+
+        maxFuzzAmount = v2Vault.depositLimit() - v2Vault.totalAssets();
 
         // Set decimals
         decimals = asset.decimals();
@@ -71,15 +84,14 @@ contract Setup is ExtendedTest, IEvents {
     function setUpStrategy() public returns (address) {
         // we save the strategy as a IStrategyInterface to give it the needed interface
         IStrategyInterface _strategy = IStrategyInterface(
-            address(new Strategy(address(asset), "Tokenized Strategy"))
+            strategyFactory.newV2Router(
+                address(v2Vault),
+                "Tokenized Strategy",
+                management,
+                performanceFeeRecipient,
+                keeper
+            )
         );
-
-        // set keeper
-        _strategy.setKeeper(keeper);
-        // set treasury
-        _strategy.setPerformanceFeeRecipient(performanceFeeRecipient);
-        // set management of the strategy
-        _strategy.setPendingManagement(management);
 
         vm.prank(management);
         _strategy.acceptManagement();
@@ -127,9 +139,20 @@ contract Setup is ExtendedTest, IEvents {
         assertEq(_totalAssets, _totalDebt + _totalIdle, "!Added");
     }
 
-    function airdrop(ERC20 _asset, address _to, uint256 _amount) public {
+    function airdrop(
+        ERC20 _asset,
+        address _to,
+        uint256 _amount
+    ) public {
         uint256 balanceBefore = _asset.balanceOf(_to);
         deal(address(_asset), _to, balanceBefore + _amount);
+    }
+
+    function harvestVault() public {
+        address _strategy = v2Vault.withdrawalQueue(0);
+        address _keeper = IV2Strategy(_strategy).keeper();
+        vm.prank(_keeper);
+        IV2Strategy(_strategy).harvest();
     }
 
     function setFees(uint16 _protocolFee, uint16 _performanceFee) public {

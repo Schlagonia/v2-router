@@ -4,55 +4,48 @@ pragma solidity 0.8.18;
 import {BaseStrategy, ERC20} from "@tokenized-strategy/BaseStrategy.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-// Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
+import {IYearnV2} from "./interfaces/IYearnV2.sol";
 
-/**
- * The `TokenizedStrategy` variable can be used to retrieve the strategies
- * specific storage data your contract.
- *
- *       i.e. uint256 totalAssets = TokenizedStrategy.totalAssets()
- *
- * This can not be used for write functions. Any TokenizedStrategy
- * variables that need to be updated post deployment will need to
- * come from an external call from the strategies specific `management`.
- */
-
-// NOTE: To implement permissioned functions you can use the onlyManagement, onlyEmergencyAuthorized and onlyKeepers modifiers
-
-contract Strategy is BaseStrategy {
+contract V2Router is BaseStrategy {
     using SafeERC20 for ERC20;
+
+    IYearnV2 public immutable v2Vault;
+
+    uint256 internal immutable scale;
 
     constructor(
         address _asset,
-        string memory _name
-    ) BaseStrategy(_asset, _name) {}
+        string memory _name,
+        address _v2Vault
+    ) BaseStrategy(_asset, _name) {
+        v2Vault = IYearnV2(_v2Vault);
+        require(v2Vault.token() == _asset, "wrong asset");
+
+        scale = 10**asset.decimals();
+
+        asset.safeApprove(_v2Vault, type(uint256).max);
+    }
 
     /*//////////////////////////////////////////////////////////////
                 NEEDED TO BE OVERRIDDEN BY STRATEGIST
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @dev Can deploy up to '_amount' of 'asset' in the yield source.
+     * @dev Should deploy up to '_amount' of 'asset' in the yield source.
      *
      * This function is called at the end of a {deposit} or {mint}
      * call. Meaning that unless a whitelist is implemented it will
      * be entirely permissionless and thus can be sandwiched or otherwise
      * manipulated.
-     *
-     * @param _amount The amount of 'asset' that the strategy can attempt
-     * to deposit in the yield source.
      */
-    function _deployFunds(uint256 _amount) internal override {
-        // TODO: implement deposit logic EX:
-        //
-        //      lendingPool.deposit(address(asset), _amount ,0);
+    function _deployFunds(uint256) internal override {
+        v2Vault.deposit();
     }
 
     /**
-     * @dev Should attempt to free the '_amount' of 'asset'.
+     * @dev Will attempt to free the '_amount' of 'asset'.
      *
-     * NOTE: The amount of 'asset' that is already loose has already
+     * The amount of 'asset' that is already loose has already
      * been accounted for.
      *
      * This function is called during {withdraw} and {redeem} calls.
@@ -71,9 +64,12 @@ contract Strategy is BaseStrategy {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        // TODO: implement withdraw logic EX:
-        //
-        //      lendingPool.withdraw(address(asset), _amount);
+        uint256 shares = convertToV2Shares(_amount);
+        uint256 balance = v2Vault.balanceOf(address(this));
+
+        if (shares > balance) shares = balance;
+
+        v2Vault.withdraw(shares);
     }
 
     /**
@@ -103,52 +99,22 @@ contract Strategy is BaseStrategy {
         override
         returns (uint256 _totalAssets)
     {
-        // TODO: Implement harvesting logic and accurate accounting EX:
-        //
-        //      if(!TokenizedStrategy.isShutdown()) {
-        //          _claimAndSellRewards();
-        //      }
-        //      _totalAssets = aToken.balanceOf(address(this)) + asset.balanceOf(address(this));
-        //
-        _totalAssets = asset.balanceOf(address(this));
+        _totalAssets =
+            asset.balanceOf(address(this)) +
+            convertToV2Assets(v2Vault.balanceOf(address(this)));
+    }
+
+    function convertToV2Shares(uint256 _amount) public view returns (uint256) {
+        return (_amount * scale) / v2Vault.pricePerShare();
+    }
+
+    function convertToV2Assets(uint256 _shares) public view returns (uint256) {
+        return (_shares * v2Vault.pricePerShare()) / scale;
     }
 
     /*//////////////////////////////////////////////////////////////
                     OPTIONAL TO OVERRIDE BY STRATEGIST
     //////////////////////////////////////////////////////////////*/
-
-    /**
-     * @dev Optional function for strategist to override that can
-     *  be called in between reports.
-     *
-     * If '_tend' is used tendTrigger() will also need to be overridden.
-     *
-     * This call can only be called by a permissioned role so may be
-     * through protected relays.
-     *
-     * This can be used to harvest and compound rewards, deposit idle funds,
-     * perform needed position maintenance or anything else that doesn't need
-     * a full report for.
-     *
-     *   EX: A strategy that can not deposit funds without getting
-     *       sandwiched can use the tend when a certain threshold
-     *       of idle to totalAssets has been reached.
-     *
-     * This will have no effect on PPS of the strategy till report() is called.
-     *
-     * @param _totalIdle The current amount of idle funds that are available to deploy.
-     *
-    function _tend(uint256 _totalIdle) internal override {}
-    */
-
-    /**
-     * @dev Optional trigger to override if tend() will be used by the strategy.
-     * This must be implemented if the strategy hopes to invoke _tend().
-     *
-     * @return . Should return true if tend() should be called by keeper or false if not.
-     *
-    function _tendTrigger() internal view override returns (bool) {}
-    */
 
     /**
      * @notice Gets the max amount of `asset` that an address can deposit.
@@ -170,45 +136,22 @@ contract Strategy is BaseStrategy {
      *
      * @param . The address that is depositing into the strategy.
      * @return . The available amount the `_owner` can deposit in terms of `asset`
-     *
-    function availableDepositLimit(
-        address _owner
-    ) public view override returns (uint256) {
-        TODO: If desired Implement deposit limit logic and any needed state variables .
-        
-        EX:    
-            uint256 totalAssets = TokenizedStrategy.totalAssets();
-            return totalAssets >= depositLimit ? 0 : depositLimit - totalAssets;
-    }
-    */
+     */
+    function availableDepositLimit(address)
+        public
+        view
+        override
+        returns (uint256)
+    {
+        uint256 limit = v2Vault.depositLimit();
+        uint256 assets = v2Vault.totalAssets();
 
-    /**
-     * @notice Gets the max amount of `asset` that can be withdrawn.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overridden by strategists.
-     *
-     * This function will be called before any withdraw or redeem to enforce
-     * any limits desired by the strategist. This can be used for illiquid
-     * or sandwichable strategies.
-     *
-     *   EX:
-     *       return asset.balanceOf(address(this));;
-     *
-     * This does not need to take into account the `_owner`'s share balance
-     * or conversion rates from shares to assets.
-     *
-     * @param . The address that is withdrawing from the strategy.
-     * @return . The available amount that can be withdrawn in terms of `asset`
-     *
-    function availableWithdrawLimit(
-        address _owner
-    ) public view override returns (uint256) {
-        TODO: If desired Implement withdraw limit logic and any needed state variables.
-        
-        EX:    
-            return asset.balanceOf(address(this));
+        if (limit > assets) {
+            unchecked {
+                return limit - assets;
+            }
+        }
     }
-    */
 
     /**
      * @dev Optional function for a strategist to override that will
@@ -230,14 +173,8 @@ contract Strategy is BaseStrategy {
      *    }
      *
      * @param _amount The amount of asset to attempt to free.
-     *
+     */
     function _emergencyWithdraw(uint256 _amount) internal override {
-        TODO: If desired implement simple logic to free deployed funds.
-
-        EX:
-            _amount = min(_amount, aToken.balanceOf(address(this)));
-            _freeFunds(_amount);
+        _freeFunds(_amount);
     }
-
-    */
 }

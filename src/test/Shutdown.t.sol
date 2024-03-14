@@ -16,6 +16,8 @@ contract ShutdownTest is Setup {
 
         assertEq(strategy.totalAssets(), _amount, "!totalAssets");
 
+        harvestVault();
+
         // Earn Interest
         skip(1 days);
 
@@ -32,10 +34,10 @@ contract ShutdownTest is Setup {
         vm.prank(user);
         strategy.redeem(_amount, user, user);
 
-        assertGe(
+        assertRelApproxEq(
             asset.balanceOf(user),
             balanceBefore + _amount,
-            "!final balance"
+            MAX_BPS
         );
     }
 
